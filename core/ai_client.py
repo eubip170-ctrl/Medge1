@@ -4,21 +4,17 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
-# Cache client (lazy)
 _CLIENT = None
-
-# Default model se non lo imposti in secrets/env
 DEFAULT_MODEL = "gpt-5-mini"
 
 
 def _read_setting(name: str, default: str = "") -> str:
     """
     Legge impostazioni in ordine:
-      1) Streamlit secrets (locale: .streamlit/secrets.toml, cloud: Settings->Secrets)
+      1) Streamlit secrets (Cloud: Manage app -> Settings -> Secrets)
       2) Variabili ambiente
       3) default
     """
-    # 1) streamlit secrets
     try:
         import streamlit as st  # type: ignore
 
@@ -30,7 +26,6 @@ def _read_setting(name: str, default: str = "") -> str:
     except Exception:
         pass
 
-    # 2) env var
     s = os.getenv(name, "").strip()
     if s:
         return s
@@ -43,8 +38,8 @@ def _get_api_key() -> str:
     if not key:
         raise RuntimeError(
             "OPENAI_API_KEY mancante.\n"
-            "- Locale: crea .streamlit/secrets.toml con OPENAI_API_KEY\n"
-            "- Streamlit Cloud: Manage app → Settings → Secrets\n"
+            "Streamlit Cloud: Manage app → Settings → Secrets\n"
+            'Esempio:\nOPENAI_API_KEY="..."\nOPENAI_MODEL="gpt-5-mini"\n'
         )
     return key
 
@@ -55,11 +50,29 @@ def _get_model(model: Optional[str]) -> str:
     return _read_setting("OPENAI_MODEL", DEFAULT_MODEL) or DEFAULT_MODEL
 
 
+def _is_reasoning_model(model_name: str) -> bool:
+    mn = (model_name or "").strip().lower()
+    return mn.startswith("gpt-5") or mn.startswith("o1") or mn.startswith("o3") or mn.startswith("o4")
+
+
+def _temperature_is_supported(model_name: str, reasoning_effort: Optional[str]) -> bool:
+    """
+    Regola pratica (in base alle linee guida GPT-5.2):
+      - GPT-5.2: temperature supportata SOLO con reasoning.effort="none"
+      - GPT-5 (es. gpt-5, gpt-5-mini, gpt-5-nano): temperature NON supportata
+      - Altri modelli (es. gpt-4.1, gpt-4o, ecc.): in genere supportata
+    """
+    mn = (model_name or "").strip().lower()
+    eff = (reasoning_effort or "").strip().lower()
+
+    if mn.startswith("gpt-5.2"):
+        return eff == "none"
+    if mn.startswith("gpt-5"):
+        return False
+    return True
+
+
 def _get_client():
-    """
-    Lazy import del pacchetto openai per evitare crash all'import del modulo
-    (se openai non è installato, l'app può comunque avviarsi e mostriamo un errore chiaro quando serve).
-    """
     global _CLIENT
     if _CLIENT is not None:
         return _CLIENT
@@ -68,8 +81,7 @@ def _get_client():
         from openai import OpenAI  # type: ignore
     except Exception as e:
         raise RuntimeError(
-            "Pacchetto 'openai' non installato.\n"
-            "Aggiungi in requirements.txt: openai>=1.0.0"
+            "Pacchetto 'openai' non installato. Aggiungi in requirements.txt: openai>=1.0.0"
         ) from e
 
     _CLIENT = OpenAI(api_key=_get_api_key())
@@ -81,13 +93,14 @@ def chat_completion(
     user_prompt: str,
     model: Optional[str] = None,
     max_output_tokens: int = 600,
-    temperature: float = 0.2,
+    temperature: Optional[float] = 0.2,
     reasoning_effort: str = "low",
 ) -> str:
     """
-    Wrapper unico per ottenere testo dal modello tramite Responses API.
+    Wrapper unico usato dall'app.
+    - Usa Responses API.
     - Se la risposta è incomplete ma contiene testo, restituisce comunque il testo.
-    - Se non c'è testo, alza errore.
+    - Evita parametri non supportati (es. temperature su gpt-5-mini).
     """
     client = _get_client()
     model_name = _get_model(model)
@@ -98,20 +111,23 @@ def chat_completion(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": float(temperature),
         "max_output_tokens": int(max_output_tokens),
     }
 
-    # reasoning è opzionale: lo mettiamo solo se richiesto
-    if reasoning_effort:
+    # Passa reasoning SOLO ai modelli reasoning
+    if _is_reasoning_model(model_name) and reasoning_effort:
         payload["reasoning"] = {"effort": str(reasoning_effort)}
+
+    # Passa temperature SOLO se supportata dal modello
+    if temperature is not None and _temperature_is_supported(model_name, reasoning_effort):
+        payload["temperature"] = float(temperature)
 
     try:
         resp = client.responses.create(**payload)
     except Exception as e:
         raise RuntimeError(f"Errore chiamata OpenAI: {e}") from e
 
-    # Via proprietà comoda dell'SDK (quando disponibile)
+    # Metodo comodo dell'SDK (quando presente)
     text = (getattr(resp, "output_text", None) or "").strip()
     if text:
         return text
@@ -149,7 +165,6 @@ def chat_completion(
                 chunks.append(str(btext))
 
     text = "\n".join(chunks).strip()
-
     if not text:
         status = getattr(resp, "status", None)
         reason = getattr(getattr(resp, "incomplete_details", None), "reason", None)
