@@ -1,129 +1,162 @@
 # core/ai_client.py
+from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
-from openai import OpenAI
+# Cache client (lazy)
+_CLIENT = None
 
-# ============================================================
-#  CONFIG API KEY / MODELLO
-# ============================================================
-
-# 1) Preferito: variabile di ambiente OPENAI_API_KEY
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-
-# 2) In alternativa puoi incollare qui la chiave (NON consigliato in produzione)
-if not OPENAI_API_KEY:
-    OPENAI_API_KEY = "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"
+# Default model se non lo imposti in secrets/env
+DEFAULT_MODEL = "gpt-5-mini"
 
 
-if not OPENAI_API_KEY or OPENAI_API_KEY.startswith("INSERISCI-"):
-    raise RuntimeError(
-        "OPENAI_API_KEY non impostata. "
-        "Imposta la variabile ambiente OPENAI_API_KEY oppure "
-        "sostituisci 'INSERISCI-LA-TUA-API-KEY-QUI' con la tua chiave reale."
-    )
+def _read_setting(name: str, default: str = "") -> str:
+    """
+    Legge impostazioni in ordine:
+      1) Streamlit secrets (locale: .streamlit/secrets.toml, cloud: Settings->Secrets)
+      2) Variabili ambiente
+      3) default
+    """
+    # 1) streamlit secrets
+    try:
+        import streamlit as st  # type: ignore
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+        v = st.secrets.get(name, None)
+        if v is not None:
+            s = str(v).strip()
+            if s:
+                return s
+    except Exception:
+        pass
 
-# Modello di default (puoi cambiarlo via env)
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini").strip()
+    # 2) env var
+    s = os.getenv(name, "").strip()
+    if s:
+        return s
+
+    return default
 
 
-# ============================================================
-#  WRAPPER CHAT COMPLETION (Responses API)
-# ============================================================
+def _get_api_key() -> str:
+    key = _read_setting("OPENAI_API_KEY", "")
+    if not key:
+        raise RuntimeError(
+            "OPENAI_API_KEY mancante.\n"
+            "- Locale: crea .streamlit/secrets.toml con OPENAI_API_KEY\n"
+            "- Streamlit Cloud: Manage app → Settings → Secrets\n"
+        )
+    return key
+
+
+def _get_model(model: Optional[str]) -> str:
+    if model and isinstance(model, str) and model.strip():
+        return model.strip()
+    return _read_setting("OPENAI_MODEL", DEFAULT_MODEL) or DEFAULT_MODEL
+
+
+def _get_client():
+    """
+    Lazy import del pacchetto openai per evitare crash all'import del modulo
+    (se openai non è installato, l'app può comunque avviarsi e mostriamo un errore chiaro quando serve).
+    """
+    global _CLIENT
+    if _CLIENT is not None:
+        return _CLIENT
+
+    try:
+        from openai import OpenAI  # type: ignore
+    except Exception as e:
+        raise RuntimeError(
+            "Pacchetto 'openai' non installato.\n"
+            "Aggiungi in requirements.txt: openai>=1.0.0"
+        ) from e
+
+    _CLIENT = OpenAI(api_key=_get_api_key())
+    return _CLIENT
+
 
 def chat_completion(
     system_prompt: str,
     user_prompt: str,
     model: Optional[str] = None,
     max_output_tokens: int = 600,
+    temperature: float = 0.2,
+    reasoning_effort: str = "low",
 ) -> str:
     """
-    Wrapper unico usato da tutto il resto del codice (news, briefing, Q&A).
-
-    Parametri:
-      - system_prompt: istruzioni di ruolo
-      - user_prompt: contenuto principale
-      - model: id modello (es. "gpt-5-nano")
-      - max_output_tokens: limite massimo di token di output
-
-    Restituisce:
-      - stringa di testo della risposta del modello
-
-    Comportamento:
-      - se la risposta è "incomplete" per max_output_tokens MA abbiamo del testo,
-        lo usiamo comunque (niente errore).
-      - se non arriva nessun testo, allora sì → errore.
+    Wrapper unico per ottenere testo dal modello tramite Responses API.
+    - Se la risposta è incomplete ma contiene testo, restituisce comunque il testo.
+    - Se non c'è testo, alza errore.
     """
-    # Se non viene passato il modello, usa il default
-    if model is None or isinstance(model, int):
-        model = DEFAULT_MODEL
+    client = _get_client()
+    model_name = _get_model(model)
+
+    payload: Dict[str, Any] = {
+        "model": model_name,
+        "input": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": float(temperature),
+        "max_output_tokens": int(max_output_tokens),
+    }
+
+    # reasoning è opzionale: lo mettiamo solo se richiesto
+    if reasoning_effort:
+        payload["reasoning"] = {"effort": str(reasoning_effort)}
 
     try:
-        resp = client.responses.create(
-            model=model,
-            input=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            # Per gpt-5-nano: riduciamo l'effort di reasoning,
-            # così lascia più spazio ai token di testo.
-            reasoning={"effort": "low"},
-            max_output_tokens=max_output_tokens,
-        )
+        resp = client.responses.create(**payload)
     except Exception as e:
         raise RuntimeError(f"Errore chiamata OpenAI: {e}") from e
 
-    # ============== Estrazione testo in modo robusto ==============
-    text_chunks: list[str] = []
+    # Via proprietà comoda dell'SDK (quando disponibile)
+    text = (getattr(resp, "output_text", None) or "").strip()
+    if text:
+        return text
 
+    # Fallback robusto: estrai testo dalla struttura output
+    chunks: List[str] = []
     output = getattr(resp, "output", None)
+
     if output is None:
-        # fallback: struttura dict
         try:
             output = resp.model_dump().get("output", [])
         except Exception:
             output = []
 
     for item in output or []:
-        # item può essere oggetto pydantic o dict
         if isinstance(item, dict):
-            item_type = item.get("type")
-            content_list = item.get("content", []) or []
+            itype = item.get("type")
+            content = item.get("content", []) or []
         else:
-            item_type = getattr(item, "type", None)
-            content_list = getattr(item, "content", []) or []
+            itype = getattr(item, "type", None)
+            content = getattr(item, "content", []) or []
 
-        if item_type != "message":
+        if itype != "message":
             continue
 
-        for block in content_list:
+        for block in content or []:
             if isinstance(block, dict):
                 btype = block.get("type")
-                text = block.get("text")
+                btext = block.get("text")
             else:
                 btype = getattr(block, "type", None)
-                text = getattr(block, "text", None)
+                btext = getattr(block, "text", None)
 
-            if btype in ("output_text", "text") and text:
-                text_chunks.append(text)
+            if btype in ("output_text", "text") and btext:
+                chunks.append(str(btext))
 
-    text = "\n".join(text_chunks).strip()
+    text = "\n".join(chunks).strip()
 
-    status = getattr(resp, "status", None)
-    incomplete_reason = getattr(getattr(resp, "incomplete_details", None), "reason", None)
-
-    # 🔴 Caso 1: nessun testo → errore
     if not text:
-        if status == "incomplete" and incomplete_reason == "max_output_tokens":
+        status = getattr(resp, "status", None)
+        reason = getattr(getattr(resp, "incomplete_details", None), "reason", None)
+        if status == "incomplete" and reason == "max_output_tokens":
             raise RuntimeError(
-                f"Risposta OpenAI troncata per max_output_tokens={max_output_tokens} "
-                "e nessun testo utile è stato restituito."
+                f"Risposta troncata per max_output_tokens={max_output_tokens} e nessun testo utile restituito."
             )
         raise RuntimeError("Nessun testo restituito da OpenAI.")
 
-    # 🟡 Caso 2: risposta 'incomplete' ma abbiamo testo → ok, lo usiamo lo stesso
-    # (se vuoi, potresti loggare un warning, ma non disturbiamo la UI)
     return text

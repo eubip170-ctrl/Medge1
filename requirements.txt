@@ -5,3 +5,4 @@ matplotlib>=3.7
 plotly>=5.0.0
 scipy>=1.10
 requests>=2.31
+openai>=1.0.0
