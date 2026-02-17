@@ -392,6 +392,7 @@ def _render_monte_carlo_terminal(
         st.warning("Monte Carlo: storico insufficiente (servono ~30 osservazioni).")
         return
 
+    # controls (NO bottone run)
     with st.expander("🎲 Monte Carlo — scenario simulation (terminal)", expanded=True):
         c1, c2, c3, c4 = st.columns([1.0, 1.0, 1.0, 1.0], gap="small")
         with c1:
@@ -407,7 +408,12 @@ def _render_monte_carlo_terminal(
         with d1:
             mode = st.selectbox("Portfolio mode", ["Rebalance", "Buy&Hold"], index=0, key=f"{key_prefix}__mode")
         with d2:
-            alpha = st.select_slider("VaR alpha", options=[0.01, 0.025, 0.05, 0.10], value=0.05, key=f"{key_prefix}__alpha")
+            alpha = st.select_slider(
+                "VaR alpha",
+                options=[0.01, 0.025, 0.05, 0.10],
+                value=0.05,
+                key=f"{key_prefix}__alpha",
+            )
         with d3:
             drift_scale = st.slider("Drift scale", 0.0, 2.0, 1.0, 0.05, key=f"{key_prefix}__drift")
         with d4:
@@ -415,6 +421,7 @@ def _render_monte_carlo_terminal(
 
         t_df = st.slider("t df (fat tails)", 3, 30, 7, 1, key=f"{key_prefix}__tdf")
 
+    # RAM guard
     est = int(days) * int(sims) * int(len(tickers))
     if est > 160_000_000:
         st.error("Parametri troppo grandi per RAM (days*sims*assets). Riduci Runs o Horizon.")
@@ -427,6 +434,7 @@ def _render_monte_carlo_terminal(
     if weights_b is not None and label_b:
         wB = weights_b.reindex(tickers).fillna(0.0).to_numpy(dtype=np.float32)
 
+    # --------- session cache ----------
     data_sig = (
         str(prices.index.min()),
         str(prices.index.max()),
@@ -468,16 +476,34 @@ def _render_monte_carlo_terminal(
                 drift_scale=float(drift_scale),
                 t_df=int(t_df),
             )
-            paths_a = _equity_from_increments(inc=inc, last_prices=last_prices, weights=wA, capital=float(initial_capital), mode=str(mode))
+            paths_a = _equity_from_increments(
+                inc=inc,
+                last_prices=last_prices,
+                weights=wA,
+                capital=float(initial_capital),
+                mode=str(mode),
+            )
             bands_a = _compute_bands(paths_a, float(alpha))
 
             paths_b = None
             bands_b = None
             if wB is not None and label_b:
-                paths_b = _equity_from_increments(inc=inc, last_prices=last_prices, weights=wB, capital=float(initial_capital), mode=str(mode))
+                paths_b = _equity_from_increments(
+                    inc=inc,
+                    last_prices=last_prices,
+                    weights=wB,
+                    capital=float(initial_capital),
+                    mode=str(mode),
+                )
                 bands_b = _compute_bands(paths_b, float(alpha))
 
-            st.session_state[cache_key] = {"key": key, "paths_a": paths_a, "bands_a": bands_a, "paths_b": paths_b, "bands_b": bands_b}
+            st.session_state[cache_key] = {
+                "key": key,
+                "paths_a": paths_a,
+                "bands_a": bands_a,
+                "paths_b": paths_b,
+                "bands_b": bands_b,
+            }
 
     pack = st.session_state.get(cache_key, {})
     paths_a = pack.get("paths_a")
@@ -504,6 +530,7 @@ def _render_monte_carlo_terminal(
     ka = kpis(paths_a)
     kb = kpis(paths_b) if paths_b is not None else None
 
+    # KPI row
     c1, c2, c3, c4, c5, c6 = st.columns(6, gap="small")
     with c1:
         st.metric("CAPITAL", f"{initial_capital:,.2f}{currency}")
@@ -535,6 +562,7 @@ def _render_monte_carlo_terminal(
         )
 
         fig = go.Figure()
+
         fig.add_trace(go.Scatter(x=x, y=bands_a["hi"], mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
         fig.add_trace(
             go.Scatter(
@@ -641,37 +669,21 @@ def _drawdown_from_equity(eq: pd.Series) -> pd.Series:
     return dd.replace([np.inf, -np.inf], np.nan).dropna()
 
 
-def _plot_drawdown_compare(dd_asset: pd.Series, dd_port: Optional[pd.Series], asset_label: str, height: int = 300) -> go.Figure:
+def _plot_drawdown(dd: pd.Series, title: str = "Drawdown", height: int = 260) -> go.Figure:
     fig = go.Figure()
-    if dd_asset is None or dd_asset.empty:
+    if dd is None or dd.empty:
         return _plotly_layout(fig, height=height)
-
-    # Asset
     fig.add_trace(
         go.Scatter(
-            x=dd_asset.index,
-            y=dd_asset.values,
+            x=dd.index,
+            y=dd.values,
             mode="lines",
-            name=f"DD {asset_label}",
+            name=title,
             line=dict(width=2),
             fill="tozeroy",
             hovertemplate="%{x|%Y-%m-%d}<br>DD: %{y:.2%}<extra></extra>",
         )
     )
-
-    # Portafoglio (stessa figura)
-    if dd_port is not None and isinstance(dd_port, pd.Series) and (not dd_port.empty):
-        fig.add_trace(
-            go.Scatter(
-                x=dd_port.index,
-                y=dd_port.values,
-                mode="lines",
-                name="DD PORT",
-                line=dict(width=2, dash="dot"),
-                hovertemplate="%{x|%Y-%m-%d}<br>DD: %{y:.2%}<extra></extra>",
-            )
-        )
-
     fig.update_yaxes(title="Drawdown", tickformat=".0%")
     return _plotly_layout(fig, height=height)
 
@@ -686,38 +698,6 @@ def _parse_sector_map(txt: str) -> Dict[str, str]:
             t, sct = part.split(":", 1)
             d[t.strip().upper()] = sct.strip()
     return d
-
-
-def _safe_pct(s: pd.Series, n: int) -> float:
-    s = pd.Series(s).astype(float).dropna()
-    if len(s) <= n or n <= 0:
-        return float("nan")
-    a = float(s.iloc[-n - 1])
-    b = float(s.iloc[-1])
-    if not np.isfinite(a) or a == 0:
-        return float("nan")
-    return (b / a) - 1.0
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _ai_analyze_ticker_cached(ticker: str, context: str) -> str:
-    # import lazy: evita crash se ai_client non disponibile
-    from core.ai_client import chat_completion
-
-    system = (
-        "Sei un analista finanziario quantitativo. "
-        "Scrivi in italiano, stile sintetico e operativo. "
-        "Struttura: (1) snapshot (trend/volatilità/drawdown), (2) rischi principali, "
-        "(3) catalizzatori possibili, (4) lettura correlazioni (diversificazione), "
-        "(5) conclusione in 3 bullet. "
-        "Non dare consigli personalizzati, solo analisi tecnica/quantitativa dei dati forniti."
-    )
-    return chat_completion(
-        system_prompt=system,
-        user_prompt=context,
-        model="gpt-5-mini",
-        max_output_tokens=750,
-    )
 
 
 # =========================
@@ -779,7 +759,7 @@ def render_analisi_page(res: Optional[dict] = None, state: Any = None) -> None:
     )
 
     # =========================================================
-    # 1) TOP CHART
+    # 1) TOP CHART: Portafogli / Titoli / Entrambi
     # =========================================================
     st.markdown("### Confronto (grafico)")
 
@@ -827,7 +807,7 @@ def render_analisi_page(res: Optional[dict] = None, state: Any = None) -> None:
     st.markdown("---")
 
     # =========================================================
-    # 2) METRICS TABLE
+    # 2) METRICS TABLE (single + colored)
     # =========================================================
     st.markdown("### Metriche (tabella unica)")
 
@@ -842,7 +822,7 @@ def render_analisi_page(res: Optional[dict] = None, state: Any = None) -> None:
     st.markdown("---")
 
     # =========================================================
-    # 3) CORRELATION
+    # 3) CORRELATION (active prices)
     # =========================================================
     st.markdown("### Correlazione titoli (portafoglio attivo)")
 
@@ -900,7 +880,7 @@ def render_analisi_page(res: Optional[dict] = None, state: Any = None) -> None:
     st.markdown("---")
 
     # =========================================================
-    # 4) MONTE CARLO
+    # 4) MONTE CARLO (NO yfinance) — CURRENT vs OPT (optional)
     # =========================================================
     st.markdown("### Monte Carlo Simulation")
 
@@ -913,7 +893,10 @@ def render_analisi_page(res: Optional[dict] = None, state: Any = None) -> None:
         if isinstance(pr, pd.DataFrame) and not pr.empty:
             pr2 = normalize_df_daily(pr).dropna(how="all")
             pr2.columns = [str(c).upper() for c in pr2.columns]
-            choices[nm] = {"prices": pr2, "weights": _build_weights_series(res.get("weights"), list(pr2.columns))}
+            choices[nm] = {
+                "prices": pr2,
+                "weights": _build_weights_series(res.get("weights"), list(pr2.columns)),
+            }
     except Exception:
         pass
 
@@ -928,7 +911,10 @@ def render_analisi_page(res: Optional[dict] = None, state: Any = None) -> None:
                     if pr2 is None or pr2.empty:
                         continue
                     pr2.columns = [str(c).upper() for c in pr2.columns]
-                    choices[nm] = {"prices": pr2, "weights": _build_weights_series(r.get("weights"), list(pr2.columns))}
+                    choices[nm] = {
+                        "prices": pr2,
+                        "weights": _build_weights_series(r.get("weights"), list(pr2.columns)),
+                    }
             except Exception:
                 continue
 
@@ -980,7 +966,7 @@ def render_analisi_page(res: Optional[dict] = None, state: Any = None) -> None:
         )
 
     # =========================================================
-    # 5) DETTAGLIO COMPONENTI (EXPANDER PER TICKER)
+    # 5) DETTAGLIO COMPONENTI (EXPANDER PER TICKER)  ✅ DENTRO FUNZIONE
     # =========================================================
     st.markdown("---")
     st.markdown("### Dettaglio componenti (per ticker)")
@@ -989,9 +975,11 @@ def render_analisi_page(res: Optional[dict] = None, state: Any = None) -> None:
         st.info("Nessun titolo disponibile per il dettaglio componenti.")
         return
 
-    port_curve = normalize_series_daily(eq_active).dropna() if isinstance(eq_active, pd.Series) else pd.Series(dtype=float)
+    # curva portafoglio attivo
+    port_curve = eq_active if isinstance(eq_active, pd.Series) else pd.Series(dtype=float)
+    port_curve = normalize_series_daily(port_curve).dropna()
 
-    # correlazione completa (una volta sola)
+    # correlazione completa (una volta sola) su titoli attivi
     px_full = prices_active.copy()
     px_full.columns = [str(c).upper() for c in px_full.columns]
     px_full = px_full.dropna(how="all").ffill().dropna(how="any")
@@ -1003,27 +991,8 @@ def render_analisi_page(res: Optional[dict] = None, state: Any = None) -> None:
         st.text_area("Sector map", key=_k("sector_map_text"))
     sector_map = _parse_sector_map(st.session_state.get(_k("sector_map_text"), ""))
 
-    # pesi (se disponibili) per contesto AI
-    w_active = None
-    try:
-        w_active = res.get("weights")
-        if not isinstance(w_active, pd.Series):
-            if isinstance(w_active, dict):
-                w_active = pd.Series(w_active)
-            else:
-                w_active = None
-    except Exception:
-        w_active = None
-    if isinstance(w_active, pd.Series):
-        w_active.index = [str(i).upper() for i in w_active.index]
-
-    # guard: AI su troppi titoli è pesante
-    MAX_AI = 25
-    tickers_list = list(asset_map.keys())
-
-    for i, ticker in enumerate(tickers_list):
+    for ticker, s_price in asset_map.items():
         t = str(ticker).upper()
-        s_price = asset_map[t]
 
         with st.expander(f"📌 {t}", expanded=False):
             s_price = normalize_series_daily(s_price).dropna()
@@ -1043,20 +1012,14 @@ def render_analisi_page(res: Optional[dict] = None, state: Any = None) -> None:
             figp = _plot_lines(df_plot, ytitle="Index (Base=100)", yfmt=".2f", height=420)
             st.plotly_chart(figp, use_container_width=True, theme=None, key=_k(f"cmp_{t}"))
 
-            # ---- 5.2 drawdown (UN SOLO GRAFICO: asset + port)
-            st.markdown("#### Drawdown (asset vs portafoglio)")
+            # ---- 5.2 drawdown componente + portafoglio
+            st.markdown("#### Drawdown")
             dd_asset = _drawdown_from_equity(s_price)
+            st.plotly_chart(_plot_drawdown(dd_asset, title=f"DD {t}"), use_container_width=True, theme=None, key=_k(f"dd_{t}"))
 
-            dd_port = None
             if not port_curve.empty:
                 dd_port = _drawdown_from_equity(port_curve.reindex(dd_asset.index).ffill().dropna())
-
-            st.plotly_chart(
-                _plot_drawdown_compare(dd_asset, dd_port, asset_label=t, height=320),
-                use_container_width=True,
-                theme=None,
-                key=_k(f"dd_cmp_{t}"),
-            )
+                st.plotly_chart(_plot_drawdown(dd_port, title="DD PORT"), use_container_width=True, theme=None, key=_k(f"dd_port_{t}"))
 
             # ---- 5.3 metriche (ticker + port)
             st.markdown("#### Metriche")
@@ -1069,72 +1032,29 @@ def render_analisi_page(res: Optional[dict] = None, state: Any = None) -> None:
             else:
                 st.dataframe(_style_metrics_table(mt_comp), use_container_width=True, height=520)
 
-            # ---- 5.4 correlazioni (riga ticker)
+            # ---- 5.4 correlazioni (riga del ticker)
             st.markdown("#### Correlazioni (vs altri titoli)")
-            top_corr_txt = ""
             if isinstance(corr_full, pd.DataFrame) and (not corr_full.empty) and (t in corr_full.columns):
                 row = corr_full[t].drop(index=t, errors="ignore").sort_values(ascending=False)
-                top = row.head(12)
-                st.dataframe(top.to_frame("ρ").round(3), use_container_width=True, height=360)
-                top_corr_txt = ", ".join([f"{idx}:{val:.2f}" for idx, val in top.head(6).items()])
+                st.dataframe(row.head(12).to_frame("ρ").round(3), use_container_width=True, height=360)
             else:
                 st.info("Correlazioni non disponibili per questo ticker.")
 
-            # ---- 5.5 settore + marketstack (stub)
+            # ---- 5.5 settore + info marketstack (stub)
             st.markdown("#### Settore / Marketstack info")
-            sector = sector_map.get(t, "—")
-            st.write("Sector:", sector)
-            st.caption("Marketstack: qui puoi mostrare info ticker se hai già una funzione pronta (es. marketstack_get_ticker_info).")
+            st.write("Sector:", sector_map.get(t, "—"))
+            st.caption("Marketstack: qui puoi vedere/stampare info ticker se hai già una funzione pronta (es. marketstack_get_ticker_info).")
 
-            # ---- 5.6 AI (AUTO) + CACHE
-            st.markdown("#### AI (gpt-5-mini) — analisi automatica")
-
-            if i >= MAX_AI:
-                st.info(f"AI disattivata oltre i primi {MAX_AI} titoli (performance/costi).")
-                continue
-
-            last_px = float(s_price.iloc[-1])
-            r_1w = _safe_pct(s_price, 5)
-            r_1m = _safe_pct(s_price, 21)
-            r_3m = _safe_pct(s_price, 63)
-            r_1y = _safe_pct(s_price, 252)
-
-            w_txt = "—"
-            if isinstance(w_active, pd.Series) and (t in w_active.index):
-                try:
-                    w_txt = f"{float(w_active.loc[t])*100:.2f}%"
-                except Exception:
-                    w_txt = "—"
-
-            # metriche principali (se abbiamo mt_comp)
-            metrics_txt = ""
-            if isinstance(mt_comp, pd.DataFrame) and (not mt_comp.empty) and (t in mt_comp.columns):
-                col = mt_comp[t]
-                # prendi poche righe significative se presenti
-                keys = ["CAGR", "Volatilità ann.", "Sharpe", "Sortino", "Max Drawdown"]
-                parts = []
-                for kname in keys:
-                    if kname in col.index:
-                        v = col.loc[kname]
-                        if np.isfinite(v):
-                            parts.append(f"{kname}={float(v):.4g}")
-                metrics_txt = ", ".join(parts)
-
-            context = (
-                f"TICKER={t}\n"
-                f"SECTOR={sector}\n"
-                f"WEIGHT_IN_PORT={w_txt}\n"
-                f"LAST_PRICE={last_px:.4f}\n"
-                f"RET_1W={r_1w:.4f}  RET_1M={r_1m:.4f}  RET_3M={r_3m:.4f}  RET_1Y={r_1y:.4f}\n"
-                f"DRAWDOWN_MIN={float(dd_asset.min()) if not dd_asset.empty else float('nan'):.4f}\n"
-                f"TOP_CORR={top_corr_txt}\n"
-                f"METRICS={metrics_txt}\n"
-                "Richiesta: interpreta trend/volatilità/drawdown; rischi/catalizzatori; correlazioni e implicazioni di diversificazione."
-            )
-
-            try:
-                with st.spinner("Generazione analisi AI..."):
-                    txt = _ai_analyze_ticker_cached(t, context)
-                st.markdown(txt)
-            except Exception as ex:
-                st.error(f"AI non disponibile: {ex}")
+            # ---- 5.6 GPT analysis (stub, lazy import)
+            st.markdown("#### AI (gpt-5-mini)")
+            use_ai = st.toggle(f"Genera analisi AI per {t}", value=False, key=_k(f"ai_{t}"))
+            if use_ai:
+                st.info("Integra qui la chiamata a chat_completion (meglio con cache). Esempio: passare metriche + correlazioni + info marketstack.")
+                # Esempio (se esiste core.ai_client.chat_completion):
+                # try:
+                #     from core.ai_client import chat_completion
+                #     prompt = f"Analizza {t} usando queste metriche: ... e correlazioni: ..."
+                #     txt = chat_completion(system_prompt="Sei un analista finanziario...", user_prompt=prompt, model="gpt-5-mini")
+                #     st.markdown(txt)
+                # except Exception as ex:
+                #     st.error(f"AI error: {ex}")
